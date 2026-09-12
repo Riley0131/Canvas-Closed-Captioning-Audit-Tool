@@ -6,3 +6,5 @@ config/__pycache__
 *.pyc
 /config/__pycache__
 /.claude
+__pycache__/
+/tests/__pycache__

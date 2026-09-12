@@ -1,4 +1,20 @@
 Beta Versions
+
+1.1.0
+-Panopto caption source detection: results now record whether captions are
+ auto-generated (ASR) or human-edited, with a confidence level and the signals
+ behind the verdict
+-YouTube results report caption source too, using YouTube's own metadata
+-Rebuilt GUI: non-blocking audits with a live activity log, progress bar and a
+ Stop button; sortable/filterable results table with a summary; settings now
+ cover the Panopto credentials as well as the Canvas token
+-Faster audits: pooled Canvas connections with retry, concurrent module
+ fetching, one shared browser and login for all stages, buffered result writes,
+ and no fixed delay between YouTube lookups
+-Audits resolve videos from cached module data instead of re-querying Canvas
+-Data folders are created automatically on first run
+-Unit test suite for the caption classifier and URL handling
+
 0.1.0
 -Fully functional individual course audits
 -Embedded Video Support, youtube video support

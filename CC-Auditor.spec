@@ -1,12 +1,31 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+# The GUI imports the audit stages lazily (inside button handlers) so the window
+# appears instantly, and `config` is a namespace package. Both patterns hide
+# modules from PyInstaller's static analysis, so they are listed explicitly.
+hiddenimports = [
+    'auditCore',
+    'browser',
+    'configStore',
+    'config.canvasAPI',
+    'config.panoptoKey',
+    'config.version',
+    'dataReset',
+    'individualAudit',
+    'panoptoCaptions',
+    'panoptoVideo',
+    'pullModules',
+    'runAudit',
+    'sortEmbeddedVideos',
+    'youtubeVideo',
+]
 
 a = Analysis(
     ['gui.py'],
     pathex=[],
     binaries=[],
-    datas=[],
-    hiddenimports=[],
+    datas=[('config', 'config')],
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
