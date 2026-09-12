@@ -19,7 +19,10 @@ A toolkit for auditing Canvas courses to confirm that instructional videos provi
 | `gui.py` | Desktop interface: threaded audits, live log, and a filterable results table. |
 | `dataReset.py` | Clears cached JSON results inside the `data/` directory tree. |
 | `config/` | User tokens (`canvasAPI.py`, `panoptoKey.py`) and the displayed app version (`version.py`). |
-| `tests/` | Unit tests for the caption classifier, URL handling, result storage and config files. |
+| `tests/` | Unit tests for every module above plus the CI scripts themselves — no network, browser, display or credentials needed. |
+| `ci/ai_review.py` | Posts a test-summary + AI-review comment on PRs and pushes. |
+| `ci/summarize_tests.py` | Turns the pytest JUnit report into GitHub Actions job outputs. |
+| `.github/workflows/ci.yml` | Runs the test suite, then the comment-posting job, on every push and PR. |
 | `requirements.txt` | Python dependencies required by the scripts and GUI. |
 | `versionNotes` | High-level changelog for historical releases. |
 
@@ -88,9 +91,29 @@ python dataReset.py
 
 ### Running the tests
 ```bash
-python -m unittest discover -s tests
+pip install pytest      # or: python -m unittest discover -s tests
+pytest tests -v
 ```
-The suite needs no network access, no browser and no credentials.
+234+ tests across 13 files cover the caption classifier, URL handling, the
+Canvas/Panopto/YouTube API plumbing (network calls mocked), the GUI's logic
+(tkinter stubbed so it runs without a display), and the CI scripts themselves.
+The suite needs no network access, no browser, no display and no credentials.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push and every pull request:
+
+1. **`test`** installs dependencies and runs the full suite above, failing the
+   build if anything fails.
+2. **`ai-review`** always runs afterward and posts one comment with the test
+   pass/fail summary plus an AI-generated review of the diff (Gemini, if
+   `GEMINI_API_KEY` is configured — optional). It comments on the pull request
+   for a `pull_request` event, on the open PR containing a pushed commit for a
+   `push` event, or on the commit itself if that commit isn't on any open PR.
+   A later push to the same PR edits the existing comment instead of piling up
+   new ones.
+
+See `AI_REVIEW_SETUP.md` for the setup steps and troubleshooting.
 
 ## Caption source detection
 

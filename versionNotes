@@ -1,5 +1,17 @@
 Beta Versions
 
+1.2.0
+-Test suite expanded from 62 to 230+ tests, now covering the Canvas/Panopto/
+ YouTube API plumbing (network mocked), the shared browser session, and the
+ GUI's logic (tkinter stubbed so it runs with no display)
+-CI rebuilt: a test job runs the suite on every push and pull request; a
+ second job always posts one comment combining the pass/fail summary with an
+ AI-generated review of the diff, on the PR itself, on the open PR containing
+ a pushed commit, or as a commit comment when neither applies. A later push
+ to the same PR edits its previous comment instead of adding a new one
+-The AI review step is now optional: missing or failing without a
+ GEMINI_API_KEY no longer blocks the test-summary comment from posting
+
 1.1.0
 -Panopto caption source detection: results now record whether captions are
  auto-generated (ASR) or human-edited, with a confidence level and the signals
