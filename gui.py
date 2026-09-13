@@ -14,14 +14,14 @@ from config.version import version
 
 def dataReset():
     """Reset all data by running the dataReset script."""
-    subprocess.run(["python", "dataReset.py"])
+    subprocess.run([sys.executable, "dataReset.py"])
     messagebox.showinfo("Reset", "Data has been reset successfully.")
 
 
 def showAuditResults():
     """show a message box showing the count of videos with and without captions."""
     messagebox.showinfo("Audit", "Running audit, this may take a while depending on the number of videos.")
-    subprocess.run(["python", "runAudit.py"], capture_output=True, text=True)
+    subprocess.run([sys.executable, "runAudit.py"], capture_output=True, text=True)
     messagebox.showinfo("Audit Complete", "Audit completed successfully. Check the 'data' folder for results.")
 
 
@@ -62,7 +62,7 @@ def runIndividualAudit(course_id):
     Run an individual course aduit. Results will be saved in the 'data' folder.
     
     """
-    subprocess.run(["python", "individualAudit.py", course_id])
+    subprocess.run([sys.executable, "individualAudit.py", course_id])
     messagebox.showinfo(
         "Audit Complete",
         f"Audit for course {course_id} completed successfully. Press 'View Results' to see the results.",
