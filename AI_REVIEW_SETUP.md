@@ -1,188 +1,127 @@
-# AI Code Review Setup Instructions
+# CI Pipeline Setup
 
-Uses Gemini 2.5 flash
+The repository runs one workflow, `.github/workflows/ci.yml`, on every pull
+request and every push to any branch. It has two jobs:
 
-This guide will help you set up the AI-powered code review workflow for your GitHub repository using Google's Gemini API (FREE tier).
+1. **`test`** — installs `requirements.txt` and `pytest`, then runs the full
+   suite under `tests/` (`pytest tests -v --junitxml=test-results.xml`). The
+   job fails if any test fails. A step afterwards (`ci/summarize_tests.py`)
+   always runs — even when tests failed — and parses the JUnit XML into
+   `total` / `failed` / `errors` / `skipped` counts plus a pass/fail
+   `outcome`, exposed as job outputs for the next job to read. The XML report
+   is uploaded as a workflow artifact.
 
-## Overview
+2. **`ai-review`** — runs regardless of whether `test` passed
+   (`if: always()`), and posts one comment combining the test summary with an
+   AI-generated review of the diff (`ci/ai_review.py`):
+   - **Pull request event** → comments directly on that PR.
+   - **Push event** → looks up the open PR containing the pushed commit (via
+     `GET /repos/{repo}/commits/{sha}/pulls`) and comments there.
+   - **Push with no open PR** (e.g. a direct push to the default branch) →
+     falls back to a comment on the commit itself.
 
-The AI Code Review workflow automatically analyzes code changes using Google's Gemini AI when:
-- A pull request is opened, synchronized, or reopened
-- Code is pushed to the `main` or `develop` branches
+   Every comment carries a hidden marker. A later run on the same PR edits
+   that comment in place instead of adding a new one each time, so a PR that
+   gets pushed to five times ends up with one evolving comment, not five.
+
+## What posts even without an AI key
+
+The AI review step (Gemini) is optional. If `GEMINI_API_KEY` is not
+configured, or the request fails for any reason, the comment still posts —
+it just says the AI review is unavailable and shows the test summary on its
+own. Nothing in the pipeline hard-fails because a key is missing.
 
 ## Prerequisites
 
-- A GitHub repository with the workflow files in place
-- A Google account (Gmail account)
-- Repository admin access to configure secrets
+- Repository admin access to configure secrets.
+- (Optional) A Google account for a Gemini API key.
 
-## Manual Setup Steps
+## Setup
 
-### 1. Get Your Free Gemini API Key
+### 1. Get a free Gemini API key (optional, for the AI review section)
 
-1. Go to [Google AI Studio](https://aistudio.google.com/app/apikey)
-2. Sign in with your Google account
-3. Click **Get API Key** or **Create API Key**
-4. Select **Create API key in new project** (or choose an existing project)
-5. Copy the API key (you can always retrieve it later from AI Studio)
+1. Go to [Google AI Studio](https://aistudio.google.com/app/apikey).
+2. Sign in and click **Get API Key** → **Create API key in new project**.
+3. Copy the key.
 
-**Note**: The free tier includes:
-- 15 requests per minute
-- 1,500 requests per day
-- No credit card required!
+Free tier: 15 requests/minute, 1,500/day, no credit card required.
 
-### 2. Add the API Key to GitHub Secrets
+### 2. Add it as a repository secret
 
-1. Go to your GitHub repository
-2. Click on **Settings** tab
-3. In the left sidebar, navigate to **Secrets and variables** → **Actions**
-4. Click **New repository secret**
-5. Set the following:
-   - **Name**: `GEMINI_API_KEY`
-   - **Secret**: Paste your Gemini API key
-6. Click **Add secret**
+**Settings → Secrets and variables → Actions → New repository secret**
+- Name: `GEMINI_API_KEY`
+- Secret: the key from step 1
 
-### 3. Configure Workflow Permissions (if needed)
+### 3. Confirm workflow permissions
 
-If the workflow fails with permission errors, you may need to enable workflow permissions:
+**Settings → Actions → General → Workflow permissions**: select **Read and
+write permissions**. The workflow needs this to post PR and commit comments
+(it declares `contents: write`, `pull-requests: write`, `issues: write` in
+`ci.yml`, but the org/repo default can still block it).
 
-1. Go to **Settings** → **Actions** → **General**
-2. Scroll to **Workflow permissions**
-3. Select **Read and write permissions**
-4. Check **Allow GitHub Actions to create and approve pull requests**
-5. Click **Save**
+### 4. Verify the files are in place
 
-### 4. Verify Workflow Files
+- `.github/workflows/ci.yml` — the workflow.
+- `ci/ai_review.py` — test summary + AI review + comment posting.
+- `ci/summarize_tests.py` — JUnit XML → job outputs.
+- `ci/requirements.txt` — dependencies for the `ai-review` job
+  (`google-generativeai`, `requests`).
+- `tests/` — the suite the `test` job runs.
 
-Ensure these files exist in your repository:
-- `.github/workflows/ai-review.yml` - The GitHub Actions workflow
-- `ci/ai_review.py` - The Python script that performs the review
+### 5. Test it
 
-### 5. Test the Workflow
+```bash
+git checkout -b test-ci
+echo "# test" >> readme.md
+git add readme.md
+git commit -m "Test the CI pipeline"
+git push -u origin test-ci
+```
 
-To test if everything is working:
+Open a PR from that branch and check the **Actions** tab: `test` should run
+the suite, then `ai-review` should post a comment on the PR with the test
+summary and (if configured) an AI review of the diff. Push another commit to
+the same PR and confirm the same comment updates instead of a new one
+appearing.
 
-1. Create a new branch:
-   ```bash
-   git checkout -b test-ai-review
-   ```
+## Optional configuration
 
-2. Make a small change to any file:
-   ```bash
-   echo "# Test change" >> README.md
-   git add README.md
-   git commit -m "Test AI review workflow"
-   git push -u origin test-ai-review
-   ```
+| Variable | Where | Effect |
+| --- | --- | --- |
+| `AI_REVIEW_MODEL` | repo variable | Gemini model to use (default `gemini-2.5-flash`) |
+| `AI_REVIEW_MAX_DIFF_CHARS` | repo variable | Max diff size sent to the model (default `12000`) |
 
-3. Create a pull request on GitHub
+Repo variables live under **Settings → Secrets and variables → Actions →
+Variables**.
 
-4. Check the **Actions** tab to see the workflow running
-
-5. Once complete, check the workflow summary for the AI review
-
-## Optional Configuration
-
-### Customize the AI Model
-
-By default, the workflow uses `gemini-1.5-flash` (fastest and free). To use a different model:
-
-1. Go to **Settings** → **Secrets and variables** → **Actions** → **Variables** tab
-2. Click **New repository variable**
-3. Add:
-   - **Name**: `AI_REVIEW_MODEL`
-   - **Value**: Your preferred model (e.g., `gemini-1.5-pro`, `gemini-1.5-flash-8b`)
-
-Available free Gemini models:
-- `gemini-1.5-flash` (recommended - balanced speed and quality)
-- `gemini-1.5-flash-8b` (fastest, lighter model)
-- `gemini-1.5-pro` (highest quality, but slower)
-- `gemini-2.0-flash-exp` (experimental next-gen model)
-
-### Adjust Diff Size Limit
-
-To change the maximum characters analyzed from diffs:
-
-1. Add a repository variable named `AI_REVIEW_MAX_DIFF_CHARS`
-2. Set the value (default is `12000`)
-
-### Modify Trigger Branches
-
-To change which branches trigger the review on push:
-
-1. Edit `.github/workflows/ai-review.yml`
-2. Modify the `push.branches` section:
-   ```yaml
-   push:
-     branches:
-       - main
-       - develop
-       - your-branch-name
-   ```
+To change which branches a push triggers the workflow on, edit the `push:`
+block in `.github/workflows/ci.yml` (currently every branch, `'**'`).
 
 ## Troubleshooting
 
-### Workflow doesn't run
-- Check that workflow files are on the default branch
-- Verify the workflow is enabled in **Actions** tab
-- Ensure you're triggering the correct events (PR or push to specified branches)
+- **No comment appears on a fork PR** — forked pull requests run with a
+  read-only `GITHUB_TOKEN` by default, so posting fails. The workflow logs the
+  failure but does not fail the build (`ci/ai_review.py` catches posting
+  errors and continues); the test summary still shows up in the workflow's
+  step summary either way.
+- **"GEMINI_API_KEY is not set"** — this is an informational log line, not an
+  error; the comment still posts without the AI section. Add the secret if
+  you want the AI section.
+- **Comment posts to the wrong place / not at all on a push** — the lookup
+  uses the commit's associated open PRs; a push whose commit isn't on any
+  open PR (e.g. it merged already, or went straight to the default branch)
+  is expected to fall back to a commit comment.
+- **Test job fails but you don't see why in the comment** — the comment only
+  carries counts, not the full failure output; check the `test` job's own
+  logs or download the `test-results` artifact.
 
-### "GEMINI_API_KEY is not set" error
-- Verify the secret name is exactly `GEMINI_API_KEY` (case-sensitive)
-- Check that the secret is set in the repository (not organization or environment)
-- Ensure you created the API key in Google AI Studio
+## Running the tests locally
 
-### API rate limit errors
-- Free tier allows 15 requests/minute and 1,500/day
-- If you hit limits, wait a few minutes or reduce review frequency
-- Consider adding conditional execution to only run on specific branches
-- Check your usage at [Google AI Studio](https://aistudio.google.com/)
+```bash
+pip install -r requirements.txt pytest
+pytest tests -v
+```
 
-### Permission errors
-- Enable workflow read/write permissions (see step 3 above)
-- Ensure the `GITHUB_TOKEN` has necessary permissions
-
-### Git command failures
-- Ensure `fetch-depth: 0` is set in the checkout step (already configured)
-- Check that the base branch exists and has commits
-
-## Cost Considerations
-
-**Good news: This is completely FREE!** 🎉
-
-Google's Gemini API free tier includes:
-- 15 requests per minute
-- 1,500 requests per day
-- No credit card required
-- No charges for standard usage
-
-This is more than enough for most repositories. Even active projects with dozens of PRs per day will stay within the free limits.
-
-## Next Steps
-
-Once set up, the AI reviewer will automatically:
-- Analyze code changes in pull requests
-- Provide feedback on potential bugs and improvements
-- Suggest missing tests
-- Add a summary to the workflow run summary
-
-The review appears in:
-- The workflow run logs (Actions tab)
-- The workflow summary page (visible after clicking on a workflow run)
-
-## Support
-
-For issues or questions:
-- Check the [GitHub Actions documentation](https://docs.github.com/en/actions)
-- Review the [Google AI Gemini API documentation](https://ai.google.dev/docs)
-- Visit [Google AI Studio](https://aistudio.google.com/) to test your API key
-- Check workflow logs in the Actions tab for detailed error messages
-
-## Switching Back to OpenAI (Optional)
-
-If you later want to use OpenAI instead:
-1. Change `GEMINI_API_KEY` to `OPENAI_API_KEY` in workflow and script
-2. Replace `google-generativeai` with `openai` package
-3. Update the API calls in `ci/ai_review.py`
-
-Note: OpenAI requires billing setup and charges per request.
+No network access, browser, or credentials are required — every external
+call (Canvas, Panopto, YouTube, Selenium, the GitHub API, Gemini) is mocked
+in the test suite.

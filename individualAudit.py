@@ -1,74 +1,40 @@
-#Riley O'Shea
-#University of Colorado Colorado Springs
-#7/14/2025
+"""Audit a single Canvas course.
 
-#audits an individual course
+Pulls just that course's modules and then runs the same pipeline a full audit
+uses, so both entry points stay in step.
+"""
 
-from pullModules import getCourseModules, sortUrls
-from youtubeVideo import get_youtube_videos, auditVideo
-import panoptoVideo
-import os
-import json
+from __future__ import annotations
+
 import sys
-import sortEmbeddedVideos
+from typing import Any, Dict
+
+import pullModules
+import runAudit
+from auditCore import ensureDataDirs
 
 
+def main(courseID: Any, headless: bool = False) -> Dict[str, int]:
+    """Audit one course and append the results to ``data/audited_videos.json``.
 
-def main(courseID):
+    Args:
+        courseID: The Canvas course ID to audit.
+        headless: Run Chrome without a visible window.
+
+    Returns:
+        Counts of videos audited per platform.
     """
-    args:
-        courseID (str): The ID of the course to audit.
-    returns:
-        Results printed in 'data\audited_videos.json'
-    Individual course aduit script.
 
-    """
-    #pull the modules for the course & save to json
-    modules = getCourseModules(courseID)
-    with open(f'data/courseModules/modules_{courseID}.json', 'w') as f:
-        json.dump(modules, f, indent=4)
+    ensureDataDirs()
+    course_id = str(courseID)
 
-    #sort the modules and save to json
-    sortedModules = sortUrls(modules)
-    with open(f'data/sortedModules/sorted_modules_{courseID}.json', 'w') as f:
-        json.dump(sortedModules, f, indent=4)
+    pullModules.cacheCourse(course_id)
 
-    #audit youtube videos in a single course
-    videos = get_youtube_videos([courseID])
-    for v in videos:
-        result = auditVideo(v)
-
-        j = {
-            "type": "youtube",
-            "url" : v,
-            "has_captions" : result,
-            "course_id": courseID,
-            }
-
-        file_path = "data/audited_videos.json"
-
-        #load existing data or initialize an empty list
-        if os.path.exists(file_path):
-            with open(file_path, "r") as f:
-                try:
-                    data = json.load(f)
-                except json.JSONDecodeError:
-                    data = []
-        else:
-            data = []
-
-        # Append new entry
-        data.append(j)
-
-        # Write back to file
-        with open(file_path, "w") as f:
-            json.dump(data, f, indent=4)
-
-
-    panoptoVideo.main([courseID], include_course_ids=True)
-    # embeddedVideo.main(courseID) #run embeddedvideo.py on the courseID
-    sortEmbeddedVideos.main([courseID])  # run sortEmbeddedVideos.py on the courseID
-
+    counts = runAudit.runPipeline(
+        [course_id], include_course_ids=True, headless=headless
+    )
+    runAudit.printSummary()
+    return counts
 
 
 if __name__ == "__main__":

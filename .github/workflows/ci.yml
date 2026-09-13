@@ -1,0 +1,102 @@
+name: CI
+
+# Runs the unit test suite on every push and every pull request, then posts a
+# combined test-summary + AI code review comment: on the PR itself for a
+# pull_request event, on the open PR associated with a pushed commit, or as a
+# commit comment when no open PR exists for that commit (e.g. a push straight
+# to the default branch).
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches:
+      - '**'
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+    outputs:
+      outcome: ${{ steps.summarize.outputs.outcome }}
+      total: ${{ steps.summarize.outputs.total }}
+      failed: ${{ steps.summarize.outputs.failed }}
+      errors: ${{ steps.summarize.outputs.errors }}
+      skipped: ${{ steps.summarize.outputs.skipped }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run test suite
+        run: pytest tests -v --junitxml=test-results.xml
+
+      - name: Summarize results
+        id: summarize
+        if: always()
+        run: python ci/summarize_tests.py
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results.xml
+          retention-days: 14
+
+  ai-review:
+    name: Post test summary and AI review
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r ci/requirements.txt
+
+      - name: Post test summary and AI review
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          GITHUB_STEP_SUMMARY: ${{ github.step_summary }}
+          TEST_OUTCOME: ${{ needs.test.outputs.outcome }}
+          TEST_TOTAL: ${{ needs.test.outputs.total }}
+          TEST_FAILED: ${{ needs.test.outputs.failed }}
+          TEST_ERRORS: ${{ needs.test.outputs.errors }}
+          TEST_SKIPPED: ${{ needs.test.outputs.skipped }}
+        run: python ci/ai_review.py

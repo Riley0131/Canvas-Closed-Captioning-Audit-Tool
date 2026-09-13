@@ -1,18 +1,87 @@
-#Riley O'Shea
-#University of Colorado Colorado Springs
-#06/25/2025
+"""Canvas course and module ingestion.
 
-#pulls user courses, seperates modules and urls by type.
+Pulls the courses the token owner is enrolled in, walks every module item, and
+sorts the discovered links by platform.
+
+Performance notes: all Canvas traffic now goes through one pooled
+:class:`requests.Session` with retry/backoff, module pages are fetched
+concurrently, and the extra per-item lookup only runs for external tools (the
+only item type that can hide a Panopto launch behind it).
+"""
+
+from __future__ import annotations
+
+import os
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Dict, Iterable, List, Optional
 
 import requests
-from config.canvasAPI import CANVAS_API_TOKEN
-import json
+from requests.adapters import HTTPAdapter
 
-CANVAS_BASE_URL = "https://canvas.uccs.edu/api/v1"
+try:
+    from urllib3.util.retry import Retry
+except Exception:  # pragma: no cover - very old urllib3
+    Retry = None  # type: ignore
+
+from auditCore import (
+    COURSES_FILE,
+    COURSE_IDS_FILE,
+    courseModulesPath,
+    dedupe,
+    ensureDataDirs,
+    saveJson,
+    sortedModulesPath,
+)
+
+try:
+    from config.canvasAPI import CANVAS_API_TOKEN
+except Exception:  # pragma: no cover - config file may be absent
+    CANVAS_API_TOKEN = ""
+
+CANVAS_API_TOKEN = os.environ.get("CANVAS_API_TOKEN") or CANVAS_API_TOKEN
+CANVAS_BASE_URL = os.environ.get("CANVAS_BASE_URL", "https://canvas.uccs.edu/api/v1")
 HEADERS = {"Authorization": f"Bearer {CANVAS_API_TOKEN}"}
 
+PER_PAGE = 100
+REQUEST_TIMEOUT = 30
+# Canvas tolerates a handful of parallel requests comfortably; this is the main
+# speed-up for courses with many modules.
+MAX_WORKERS = int(os.environ.get("CANVAS_MAX_WORKERS", "8"))
 
-def _get_next_link(link_header):
+VERBOSE = os.environ.get("AUDIT_VERBOSE", "").lower() in {"1", "true", "yes"}
+
+
+def _log(message: str) -> None:
+    """Print detail lines only when verbose output is requested."""
+
+    if VERBOSE:
+        print(message)
+
+
+def _buildSession() -> requests.Session:
+    session = requests.Session()
+    session.headers.update(HEADERS)
+
+    if Retry is not None:
+        retry = Retry(
+            total=3,
+            backoff_factor=1.0,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=frozenset({"GET"}),
+        )
+        adapter = HTTPAdapter(
+            max_retries=retry, pool_connections=MAX_WORKERS, pool_maxsize=MAX_WORKERS * 2
+        )
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+
+    return session
+
+
+SESSION = _buildSession()
+
+
+def _getNextLink(link_header: Optional[str]) -> Optional[str]:
     """Return the ``rel=next`` URL from a Canvas pagination header."""
 
     if not link_header:
@@ -31,231 +100,231 @@ def _get_next_link(link_header):
     return None
 
 
-#retrieves all courses that the user is enrolled in
-def get_courses():
-    '''Fetches all courses the user is enrolled in from Canvas API.'''
-    print("Debug: Fetching courses")
-    courses = []
-    url = f"{CANVAS_BASE_URL}/courses"
-    params = {"per_page": 100}
+# Backwards compatible alias for callers that used the old private helper.
+_get_next_link = _getNextLink
+
+
+def _paginate(url: str, label: str) -> List[Any]:
+    """Follow Canvas pagination and return every item across all pages."""
+
+    collected: List[Any] = []
+    params: Optional[Dict[str, int]] = {"per_page": PER_PAGE}
 
     while url:
-        request_kwargs = {"headers": HEADERS}
-        if params is not None and "?" not in url:
-            request_kwargs["params"] = params
-
-        response = requests.get(url, **request_kwargs)
-        if response.status_code != 200:
-            print(f"Error fetching courses: {response.status_code} - {response.text}")
+        try:
+            response = SESSION.get(url, params=params, timeout=REQUEST_TIMEOUT)
+        except requests.RequestException as exc:
+            print(f"Error fetching {label}: {exc}")
             break
 
-        batch = response.json()
-        print(f"Debug: Fetched {len(batch)} courses")
-        courses.extend(batch)
-
-        url = _get_next_link(response.headers.get("Link", ""))
-        params = None
-
-    return courses
-
-#Fetches all modules for a specific course
-def getCourseModules(course_id):
-    """Fetches all modules for a specific course from Canvas API.
-    Args:
-        course_id (int): The ID of the course to fetch modules for.
-    Returns:
-        list: A list of URLs for items in the course modules.
-    """
-    urls = []  # stores the urls of the items in the modules
-    url = f"{CANVAS_BASE_URL}/courses/{course_id}/modules"
-    params = {"per_page": 100}
-
-    while url:
-        request_kwargs = {"headers": HEADERS}
-        if params is not None:
-            request_kwargs["params"] = params
-
-        response = requests.get(url, **request_kwargs)
         if response.status_code != 200:
-            print(
-                f"Error fetching modules for course {course_id}: {response.status_code} - {response.text}"
-            )
+            print(f"Error fetching {label}: {response.status_code} - {response.text[:160]}")
             break
 
-        payload = response.json()
-        items_urls = [module.get("items_url") for module in payload]
+        try:
+            payload = response.json()
+        except ValueError:
+            print(f"Error fetching {label}: response was not JSON")
+            break
 
-        for items_url in items_urls:
-            if not items_url:
-                continue
+        if isinstance(payload, list):
+            collected.extend(payload)
+        else:
+            collected.append(payload)
 
-            item_url = items_url
-            item_params = {"per_page": 100}
+        url = _getNextLink(response.headers.get("Link"))
+        params = None  # the next-link already carries the query string
 
-            while item_url:
-                item_kwargs = {"headers": HEADERS}
-                if item_params is not None and "?" not in item_url:
-                    item_kwargs["params"] = item_params
+    return collected
 
-                items_response = requests.get(item_url, **item_kwargs)
-                if items_response.status_code != 200:
-                    print(
-                        f"Error fetching module items for course {course_id}: {items_response.status_code} - {items_response.text}"
-                    )
-                    break
 
-                items = items_response.json()
-                for item in items:
-                    link = item.get("url")
-                    external = item.get("external_url")
-                    item_type = item.get("type")
-                    is_panopto_external_tool = False
+def get_courses() -> List[Dict[str, Any]]:
+    """Fetch every course the token owner is enrolled in."""
 
-                    # Check if this is an external tool (potentially Panopto)
-                    if link and item_type == "ExternalTool":
-                        try:
-                            # Check if the item itself contains Panopto information
-                            item_title = item.get("title", "").lower()
-                            item_external_url = item.get("external_url", "").lower()
+    print("Fetching courses from Canvas...")
+    courses = _paginate(f"{CANVAS_BASE_URL}/courses", "courses")
+    print(f"Found {len(courses)} course(s).")
+    return [course for course in courses if isinstance(course, dict)]
 
-                            # Check if this is a Panopto tool based on item metadata
-                            is_panopto = "panopto" in item_title or "panopto" in item_external_url
 
-                            # Make an additional API call to the Canvas module item URL
-                            link_response = requests.get(link, headers=HEADERS)
-                            if link_response.status_code == 200:
-                                link_data = link_response.json()
-                                print(f"Debug: API response for {link}: {link_data}")
+def _resolveExternalTool(item: Dict[str, Any]) -> List[str]:
+    """Resolve a module item of type ``ExternalTool`` into usable URLs.
 
-                                # Check if this is a Panopto external tool
-                                external_tool_url = link_data.get("external_url", "")
-
-                                # Also check the response for Panopto indicators
-                                if not is_panopto:
-                                    is_panopto = "panopto" in external_tool_url.lower()
-
-                                # Look for sessionless_launch URL
-                                sessionless_url = link_data.get("url")
-
-                                # If it's Panopto, use the sessionless_launch URL for Selenium testing
-                                if is_panopto:
-                                    is_panopto_external_tool = True
-                                    if sessionless_url:
-                                        # Mark this as a Panopto URL by adding a marker parameter
-                                        marked_url = sessionless_url + "&_panopto_video=true"
-                                        urls.append(marked_url)
-                                        print(f"Debug: Found Panopto sessionless_launch URL: {marked_url}")
-                                    else:
-                                        # Fallback to external_url if available
-                                        if external_tool_url:
-                                            urls.append(external_tool_url)
-                                            print(f"Debug: Using Panopto external_url: {external_tool_url}")
-                                        else:
-                                            urls.append(link)
-                                else:
-                                    # Not Panopto, add the direct URL if available
-                                    direct_url = link_data.get("url", link)
-                                    urls.append(direct_url)
-                            else:
-                                # Fallback to original link if API call fails
-                                urls.append(link)
-                        except Exception as e:
-                            print(f"Error following Canvas API for external tool {link}: {e}")
-                            # Fallback to original link
-                            urls.append(link)
-                    elif link and "panopto" in link.lower():
-                        # Direct Panopto link
-                        urls.append(link)
-                    elif link:
-                        urls.append(link)
-
-                    # Skip adding external_url for Panopto external tools (we already added the sessionless_launch URL)
-                    if external and not is_panopto_external_tool:
-                        urls.append(external)
-
-                item_url = _get_next_link(items_response.headers.get("Link", ""))
-                item_params = None
-
-        url = _get_next_link(response.headers.get("Link", ""))
-        params = None
-
-    print(f"Debug: Found {len(urls)} URLs in course {course_id}")
-    return urls
-    
-def sortUrls(urls):
+    Panopto is surfaced in Canvas as an LTI tool, so the launch URL has to be
+    resolved through the module item endpoint. Panopto launches are tagged with
+    a marker parameter so the sorter can recognise them later.
     """
-    Sorts the different url's based on type
-    args:
-        urls (list): A list of URLs to sort.
-    Returns:
-        dict: A dictionary with sorted URLs categorized by type.
-        The keys are 'youtube', 'canvas', 'panopto', and 'other'.
-    """
-    print("Debug: Sorting URLs")
-    if not urls:
-        print("Debug: No URLs to sort")
-        return {"youtube": [], "canvas": [], "panopto": [], "other": []}
 
-    youtube = []
-    canvas = []
-    panopto = []
-    other = []
+    link = item.get("url")
+    if not link:
+        return []
 
-    
-    for u in urls:
-        if not isinstance(u, str):
-            print(f"Debug: Skipping non-string URL: {u}")
+    title = str(item.get("title", "")).lower()
+    external_url = str(item.get("external_url", "")).lower()
+    is_panopto = "panopto" in title or "panopto" in external_url
+
+    try:
+        response = SESSION.get(link, timeout=REQUEST_TIMEOUT)
+    except requests.RequestException as exc:
+        _log(f"Error resolving external tool {link}: {exc}")
+        return [link]
+
+    if response.status_code != 200:
+        return [link]
+
+    try:
+        data = response.json()
+    except ValueError:
+        return [link]
+
+    tool_url = str(data.get("external_url", "") or "")
+    sessionless_url = data.get("url")
+    is_panopto = is_panopto or "panopto" in tool_url.lower()
+
+    if not is_panopto:
+        return [str(data.get("url") or link)]
+
+    if sessionless_url:
+        separator = "&" if "?" in str(sessionless_url) else "?"
+        marked = f"{sessionless_url}{separator}_panopto_video=true"
+        _log(f"Found Panopto launch URL: {marked}")
+        return [marked]
+
+    return [tool_url or link]
+
+
+def _collectModuleItems(items_url: str, course_id: Any) -> List[str]:
+    """Return every URL exposed by the items of a single module."""
+
+    urls: List[str] = []
+
+    for item in _paginate(items_url, f"module items for course {course_id}"):
+        if not isinstance(item, dict):
             continue
 
-        lower = u.lower()
+        link = item.get("url")
+        external = item.get("external_url")
+
+        if item.get("type") == "ExternalTool" and link:
+            resolved = _resolveExternalTool(item)
+            urls.extend(resolved)
+            # The launch URL already represents this item; adding external_url
+            # as well would double count the same video.
+            if any("_panopto_video=true" in url for url in resolved):
+                continue
+        elif link:
+            urls.append(link)
+
+        if external:
+            urls.append(external)
+
+    return urls
+
+
+def getCourseModules(course_id: Any) -> List[str]:
+    """Fetch every module item URL for a course.
+
+    Args:
+        course_id: The Canvas course ID.
+
+    Returns:
+        A de-duplicated list of URLs found in the course's modules.
+    """
+
+    modules = _paginate(f"{CANVAS_BASE_URL}/courses/{course_id}/modules", f"modules for course {course_id}")
+    items_urls = [
+        module.get("items_url")
+        for module in modules
+        if isinstance(module, dict) and module.get("items_url")
+    ]
+
+    urls: List[str] = []
+    if items_urls:
+        workers = max(1, min(MAX_WORKERS, len(items_urls)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for result in pool.map(lambda u: _collectModuleItems(u, course_id), items_urls):
+                urls.extend(result)
+
+    urls = dedupe(url for url in urls if isinstance(url, str) and url)
+    print(f"Course {course_id}: found {len(urls)} module URL(s).")
+    return urls
+
+
+def sortUrls(urls: Optional[Iterable[Any]]) -> Dict[str, List[str]]:
+    """Bucket URLs by video platform.
+
+    Args:
+        urls: URLs discovered in a course.
+
+    Returns:
+        A dict with ``youtube``, ``canvas``, ``panopto`` and ``other`` keys.
+    """
+
+    buckets: Dict[str, List[str]] = {
+        "youtube": [],
+        "canvas": [],
+        "panopto": [],
+        "other": [],
+    }
+
+    if not urls:
+        return buckets
+
+    for url in urls:
+        if not isinstance(url, str):
+            continue
+
+        lower = url.lower()
 
         if "youtu" in lower:
-            print(f"Debug: Found YouTube URL: {u}")
-            youtube.append(u)
+            buckets["youtube"].append(url)
         elif "panopto" in lower or "_panopto_video=true" in lower:
-            print(f"Debug: Found Panopto URL: {u}")
-            panopto.append(u)
-        elif ("canvas" in lower) and ("files" in lower):
-            print(f"Debug: Found Canvas URL: {u}")
-            canvas.append(u)
+            buckets["panopto"].append(url)
+        elif "canvas" in lower and "files" in lower:
+            buckets["canvas"].append(url)
         else:
-            print(f"Debug: Found other URL: {u}")
-            other.append(u)
+            buckets["other"].append(url)
 
-    return {
-        "youtube": youtube,
-        "canvas": canvas,
-        "panopto": panopto,
-        "other": other
-    }
-            
-    
+    for key, values in buckets.items():
+        buckets[key] = dedupe(values)
 
-def main():
-    #get courses
+    _log(
+        "Sorted URLs - "
+        + ", ".join(f"{key}: {len(value)}" for key, value in buckets.items())
+    )
+    return buckets
+
+
+def cacheCourse(course_id: Any) -> List[str]:
+    """Pull one course's modules, cache them, and cache the sorted buckets."""
+
+    ensureDataDirs()
+    modules = getCourseModules(course_id)
+    saveJson(courseModulesPath(course_id), modules)
+    saveJson(sortedModulesPath(course_id), sortUrls(modules))
+    return modules
+
+
+def main() -> List[str]:
+    """Pull every course, cache its modules, and sort them by platform.
+
+    Returns:
+        The list of course IDs that were processed.
+    """
+
+    ensureDataDirs()
+
     courses = get_courses()
-    courses_ids = [course['id'] for course in courses]
-    with open('data/courses.json', 'w') as f:
-        json.dump(courses, f, indent=4)
-   
-    #save course ids
-    with open('data/courses_ids.json', 'w') as f:
-        json.dump(courses_ids, f, indent=4)
+    course_ids = [str(course["id"]) for course in courses if "id" in course]
 
-    
-    #Pull modules for each course & sort
-    for course in courses_ids:
-        modules = getCourseModules(course)
-        with open(f'data/courseModules/modules_{course}.json', 'w') as f:
-            json.dump(modules, f, indent=4)
+    saveJson(COURSES_FILE, courses)
+    saveJson(COURSE_IDS_FILE, course_ids)
 
-    #sort modules and save to json
-    for course in courses_ids:
-        with open(f'data/courseModules/modules_{course}.json', 'r') as f:
-            urls = json.load(f)
-        sortedUrls = sortUrls(urls)
-        with open(f'data/sortedModules/sorted_modules_{course}.json', 'w') as f:
-            json.dump(sortedUrls, f, indent=4)
+    for index, course_id in enumerate(course_ids, start=1):
+        print(f"[{index}/{len(course_ids)}] Pulling modules for course {course_id}")
+        cacheCourse(course_id)
+
+    return course_ids
 
 
 if __name__ == "__main__":

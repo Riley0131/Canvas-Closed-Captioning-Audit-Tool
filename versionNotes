@@ -1,4 +1,32 @@
 Beta Versions
+
+1.2.0
+-Test suite expanded from 62 to 230+ tests, now covering the Canvas/Panopto/
+ YouTube API plumbing (network mocked), the shared browser session, and the
+ GUI's logic (tkinter stubbed so it runs with no display)
+-CI rebuilt: a test job runs the suite on every push and pull request; a
+ second job always posts one comment combining the pass/fail summary with an
+ AI-generated review of the diff, on the PR itself, on the open PR containing
+ a pushed commit, or as a commit comment when neither applies. A later push
+ to the same PR edits its previous comment instead of adding a new one
+-The AI review step is now optional: missing or failing without a
+ GEMINI_API_KEY no longer blocks the test-summary comment from posting
+
+1.1.0
+-Panopto caption source detection: results now record whether captions are
+ auto-generated (ASR) or human-edited, with a confidence level and the signals
+ behind the verdict
+-YouTube results report caption source too, using YouTube's own metadata
+-Rebuilt GUI: non-blocking audits with a live activity log, progress bar and a
+ Stop button; sortable/filterable results table with a summary; settings now
+ cover the Panopto credentials as well as the Canvas token
+-Faster audits: pooled Canvas connections with retry, concurrent module
+ fetching, one shared browser and login for all stages, buffered result writes,
+ and no fixed delay between YouTube lookups
+-Audits resolve videos from cached module data instead of re-querying Canvas
+-Data folders are created automatically on first run
+-Unit test suite for the caption classifier and URL handling
+
 0.1.0
 -Fully functional individual course audits
 -Embedded Video Support, youtube video support
