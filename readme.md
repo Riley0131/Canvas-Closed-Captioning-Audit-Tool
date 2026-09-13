@@ -210,6 +210,10 @@ To remove a platform, drop its branch from `sortUrls()` and its call from `runPi
 * **Headless mode finds nothing**: the Panopto and Canvas stages need a logged-in session. Headless mode suppresses the login prompt, so use it only where authentication is already handled.
 * **Panopto captions report `unknown`**: without OAuth credentials the audit can often only see that a caption control exists. Add the Panopto client ID and secret for authoritative answers.
 * **Rate limits**: lower `CANVAS_MAX_WORKERS` or raise `YOUTUBE_BACKOFF` if throttling responses appear.
+* **GUI window opens but is completely blank on macOS**: this is a long-standing Tcl/Tk bug, not specific to this app — any Tkinter program is affected on macOS 11 (Big Sur) and later when running on a Python build whose bundled Tcl/Tk is older than 8.6.13. `gui.py` works around it automatically by nudging the window's size right after it opens, which forces the affected Tk builds to redraw. If the window is still blank:
+  * Manually resize or move the window once — that alone fixes it for the rest of the session.
+  * Check your Tcl/Tk version: `python3 -c "import tkinter; print(tkinter.Tcl().eval('info patchlevel'))"`. Below `8.6.13`, upgrade Python (3.9.17+, 3.10.12+, 3.11.4+, or any 3.12+ from [python.org](https://www.python.org/downloads/macos/) bundle a fixed Tcl/Tk), or run `brew install python-tk` for a Homebrew Python.
+  * If you built the packaged `CC-Auditor` executable yourself with PyInstaller, it bundles whatever Tcl/Tk your build machine had at build time — rebuild it after upgrading Python/Tcl-Tk rather than just upgrading Python on the machine that runs it.
 
 ## Additional resources
 

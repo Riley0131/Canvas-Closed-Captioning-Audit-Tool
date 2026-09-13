@@ -105,14 +105,21 @@ class AuditApp:
     # layout
     def _configureStyle(self) -> None:
         style = ttk.Style()
-        # 'clam' is available everywhere and looks consistent across platforms.
-        if "clam" in style.theme_names():
+        # macOS's native 'aqua' theme renders correctly and looks native;
+        # switching away from it has caused blank/undrawn ttk widgets on some
+        # Tk builds. 'clam' is the better choice on Windows/Linux, where the
+        # platform default theme looks dated.
+        if sys.platform != "darwin" and "clam" in style.theme_names():
             style.theme_use("clam")
 
-        style.configure("Header.TLabel", font=("Segoe UI", 18, "bold"))
+        # "Segoe UI" is a Windows-only font family; naming it directly here
+        # left the header and buttons invisible/using a fallback face on
+        # macOS and Linux. The Tk named fonts below always resolve to
+        # whatever the current platform's real default font is.
+        style.configure("Header.TLabel", font=("TkDefaultFont", 18, "bold"))
         style.configure("Sub.TLabel", foreground="#555555")
         style.configure("Danger.TButton", foreground="#8b0000")
-        style.configure("Accent.TButton", font=("Segoe UI", 10, "bold"))
+        style.configure("Accent.TButton", font=("TkDefaultFont", 10, "bold"))
 
     def _buildLayout(self) -> None:
         container = ttk.Frame(self.root, padding=PAD)
@@ -179,7 +186,7 @@ class AuditApp:
             foreground="#d4d4d4",
             insertbackground="#d4d4d4",
             relief="flat",
-            font=("Consolas", 9),
+            font=("TkFixedFont", 9),
         )
         self.log.grid(row=0, column=0, sticky="nsew")
 
@@ -435,7 +442,7 @@ class ResultsWindow(tk.Toplevel):
                 f"{captioned} captioned ({captioned / total:.0%}), "
                 f"{summary['withoutCaptions']} missing captions"
             ),
-            font=("Segoe UI", 11, "bold"),
+            font=("TkDefaultFont", 11, "bold"),
         ).pack(anchor="w")
 
         breakdown = " | ".join(
@@ -678,10 +685,54 @@ class SettingsDialog(tk.Toplevel):
         self.destroy()
 
 
+def performMacBlankWindowNudge(root: "tk.Tk") -> None:
+    """Force a redraw to work around a known Tcl/Tk-on-macOS rendering bug.
+
+    Tcl/Tk builds older than 8.6.13 render windows entirely blank on macOS
+    Big Sur (11) and later until the window is resized or moved - the window
+    frame appears but every widget inside it is invisible. This affects any
+    Tkinter app, not just this one, and is not something the app's own
+    layout code can avoid; the real fix is upgrading to a Python build with
+    a newer bundled Tcl/Tk (see the README). Nudging the window's height by a
+    pixel and back forces the affected Tk builds to repaint, which resolves
+    the symptom without requiring the user to manually resize the window.
+    """
+
+    try:
+        root.update_idletasks()
+        width, height = root.winfo_width(), root.winfo_height()
+    except tk.TclError:
+        return
+
+    if width <= 1 or height <= 1:
+        return  # window is not mapped yet; nothing to nudge
+
+    def _grow() -> None:
+        try:
+            root.geometry(f"{width}x{height + 1}")
+        except tk.TclError:
+            return
+        root.after(60, _shrink)
+
+    def _shrink() -> None:
+        try:
+            root.geometry(f"{width}x{height}")
+        except tk.TclError:
+            pass
+
+    _grow()
+
+
 def main() -> None:
     ensureDataDirs()
     root = tk.Tk()
     AuditApp(root)
+
+    if sys.platform == "darwin":
+        # Give the window manager a moment to actually map the window before
+        # measuring and nudging it.
+        root.after(150, lambda: performMacBlankWindowNudge(root))
+
     root.mainloop()
 
 

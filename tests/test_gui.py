@@ -167,6 +167,7 @@ def _installTkinterStub():
     tk.StringVar = type("StringVar", (_Var,), {})
     tk.BooleanVar = type("BooleanVar", (_Var,), {})
     tk.Misc = _Widget
+    tk.TclError = type("TclError", (Exception,), {})
 
     messagebox = types.ModuleType("tkinter.messagebox")
     messagebox.showinfo = mock.Mock()
@@ -504,6 +505,104 @@ class CloseHandlingTests(unittest.TestCase):
         finally:
             release.set()
             app.worker.join(5)
+
+
+class MacBlankWindowNudgeTests(unittest.TestCase):
+    """gui.performMacBlankWindowNudge works around a macOS Tcl/Tk rendering
+    bug where windows render entirely blank until resized or moved."""
+
+    def test_mappedWindowIsGrownThenScheduledToShrinkBack(self):
+        fake_root = mock.Mock()
+        fake_root.winfo_width.return_value = 800
+        fake_root.winfo_height.return_value = 500
+
+        gui.performMacBlankWindowNudge(fake_root)
+
+        fake_root.geometry.assert_called_once_with("800x501")
+        fake_root.after.assert_called_once()
+        self.assertEqual(fake_root.after.call_args.args[0], 60)
+
+    def test_scheduledShrinkRestoresOriginalSize(self):
+        fake_root = mock.Mock()
+        fake_root.winfo_width.return_value = 800
+        fake_root.winfo_height.return_value = 500
+
+        gui.performMacBlankWindowNudge(fake_root)
+        shrink_callback = fake_root.after.call_args.args[1]
+
+        fake_root.geometry.reset_mock()
+        shrink_callback()
+
+        fake_root.geometry.assert_called_once_with("800x500")
+
+    def test_unmappedWindowIsSkippedWithoutTouchingGeometry(self):
+        fake_root = mock.Mock()
+        fake_root.winfo_width.return_value = 1
+        fake_root.winfo_height.return_value = 1
+
+        gui.performMacBlankWindowNudge(fake_root)
+
+        fake_root.geometry.assert_not_called()
+        fake_root.after.assert_not_called()
+
+    def test_tclErrorWhileMeasuringIsSwallowed(self):
+        fake_root = mock.Mock()
+        fake_root.update_idletasks.side_effect = tk.TclError("no display")
+
+        gui.performMacBlankWindowNudge(fake_root)  # must not raise
+
+        fake_root.geometry.assert_not_called()
+
+    def test_tclErrorWhileGrowingIsSwallowedAndShrinkIsNeverScheduled(self):
+        fake_root = mock.Mock()
+        fake_root.winfo_width.return_value = 800
+        fake_root.winfo_height.return_value = 500
+        fake_root.geometry.side_effect = tk.TclError("window already destroyed")
+
+        gui.performMacBlankWindowNudge(fake_root)  # must not raise
+
+        fake_root.after.assert_not_called()
+
+    def test_tclErrorWhileShrinkingIsSwallowed(self):
+        fake_root = mock.Mock()
+        fake_root.winfo_width.return_value = 800
+        fake_root.winfo_height.return_value = 500
+
+        gui.performMacBlankWindowNudge(fake_root)
+        shrink_callback = fake_root.after.call_args.args[1]
+
+        fake_root.geometry.side_effect = tk.TclError("window already destroyed")
+        shrink_callback()  # must not raise
+
+
+class MainEntryPointTests(unittest.TestCase):
+    @staticmethod
+    def _delaysScheduled(after_mock):
+        return [call.args[0] for call in after_mock.call_args_list]
+
+    def test_macNudgeIsScheduledOnDarwin(self):
+        with mock.patch.object(gui, "ensureDataDirs"), \
+             mock.patch.object(gui.sys, "platform", "darwin"):
+            app_root = tk.Tk()
+            with mock.patch.object(gui.tk, "Tk", return_value=app_root), \
+                 mock.patch.object(app_root, "after") as after, \
+                 mock.patch.object(app_root, "mainloop"):
+                gui.main()
+
+        # AuditApp's own log-drain poll (100ms) also uses .after; only assert
+        # that the 150ms mac-nudge scheduling was added alongside it.
+        self.assertIn(150, self._delaysScheduled(after))
+
+    def test_macNudgeIsNotScheduledOnOtherPlatforms(self):
+        with mock.patch.object(gui, "ensureDataDirs"), \
+             mock.patch.object(gui.sys, "platform", "win32"):
+            app_root = tk.Tk()
+            with mock.patch.object(gui.tk, "Tk", return_value=app_root), \
+                 mock.patch.object(app_root, "after") as after, \
+                 mock.patch.object(app_root, "mainloop"):
+                gui.main()
+
+        self.assertNotIn(150, self._delaysScheduled(after))
 
 
 if __name__ == "__main__":
