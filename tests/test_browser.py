@@ -166,22 +166,15 @@ class PromptContinueTests(unittest.TestCase):
 
         handler.assert_called_once_with("Title", "Message")
 
-    def test_noHandlerAndNoTkFallsBackToInput(self):
-        with mock.patch.object(browser, "tk", None), \
-             mock.patch("builtins.input", return_value="") as fake_input:
+    def test_noHandlerFallsBackToInput(self):
+        with mock.patch("builtins.input", return_value="") as fake_input:
             browser.promptContinue("Title", "Message")
 
         fake_input.assert_called_once()
 
-    def test_tkFailureFallsBackToInput(self):
-        fake_tk = mock.Mock()
-        fake_tk.Tk.side_effect = RuntimeError("no display")
-
-        with mock.patch.object(browser, "tk", fake_tk), \
-             mock.patch("builtins.input", return_value="") as fake_input:
-            browser.promptContinue("Title", "Message")
-
-        fake_input.assert_called_once()
+    def test_noHandlerAndClosedStdinDoesNotRaise(self):
+        with mock.patch("builtins.input", side_effect=EOFError):
+            browser.promptContinue("Title", "Message")  # must not raise
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # Closed Captioning Audit
 
-A toolkit for auditing Canvas courses to confirm that instructional videos provide accessible captioning. The project bundles a command-line workflow and a Tkinter GUI that automate pulling course content from the Canvas API, checking caption availability on supported video platforms, **identifying whether captions were machine generated or human edited**, and writing consolidated results for accessibility reviewers.
+A toolkit for auditing Canvas courses to confirm that instructional videos provide accessible captioning. The project bundles a command-line workflow and a desktop GUI that automate pulling course content from the Canvas API, checking caption availability on supported video platforms, **identifying whether captions were machine generated or human edited**, and writing consolidated results for accessibility reviewers.
 
 ## Repository structure
 
@@ -16,7 +16,9 @@ A toolkit for auditing Canvas courses to confirm that instructional videos provi
 | `auditCore.py` | Shared data folder layout, JSON helpers, buffered result writer, summary aggregation, cancellation flag. |
 | `browser.py` | One shared Chrome session and login prompt for every browser-backed stage. |
 | `configStore.py` | Reads and writes the credential files under `config/`. |
-| `gui.py` | Desktop interface: threaded audits, live log, and a filterable results table. |
+| `gui.py` | Thin pywebview window: creates the window, translates its API's progress callbacks into JavaScript. |
+| `gui_api.py` | The GUI's actual logic (run an audit, load results, save settings) - toolkit-independent and unit tested on its own. |
+| `webui/` | The GUI's page: `index.html`, `style.css`, `app.js`. |
 | `dataReset.py` | Clears cached JSON results inside the `data/` directory tree. |
 | `config/` | User tokens (`canvasAPI.py`, `panoptoKey.py`) and the displayed app version (`version.py`). |
 | `tests/` | Unit tests for every module above plus the CI scripts themselves — no network, browser, display or credentials needed. |
@@ -31,9 +33,10 @@ The `data/` folder and its `courseModules/` and `sortedModules/` subdirectories 
 ## Prerequisites
 
 * **Python**: 3.10 or newer.
-* **Pip packages**: `pip install -r requirements.txt` (`requests`, `selenium`, `webdriver-manager`, `youtube-transcript-api`).
+* **Pip packages**: `pip install -r requirements.txt` (`requests`, `selenium`, `webdriver-manager`, `youtube-transcript-api`, `pywebview`).
 * **Google Chrome**: Selenium downloads a matching ChromeDriver via `webdriver-manager`, so Chrome must be installed. Set `CHROMEDRIVER_PATH` to use a driver you manage yourself.
 * **Canvas access**: the auditing account must be enrolled in the target courses. The browser-backed stages require an interactive login once per run.
+* **Linux only**: the GUI needs a GTK + WebKitGTK runtime available as a system package (package name varies by distro and release - see the [pywebview install docs](https://pywebview.flowrl.com/guide/installation.html) if `python gui.py` reports a missing GTK/WebKit dependency). macOS and Windows use their OS's built-in web engine, nothing extra to install there.
 
 ## Initial setup
 
@@ -73,9 +76,11 @@ A run writes `data/courses.json`, `data/courses_ids.json`, `data/courseModules/m
 ```bash
 python gui.py
 ```
+The window is a local web page rendered by the OS's own web engine (WKWebView on macOS, WebView2 on Windows, WebKitGTK on Linux) via [pywebview](https://pywebview.flowrl.com/) - not Tkinter. See [Why pywebview instead of Tkinter](#why-pywebview-instead-of-tkinter) below for why.
+
 * **Run Complete Audit** / **Audit One Course...** run in the background; the window stays responsive and streams progress into the activity log.
 * **Stop** ends the run after the current video, keeping everything recorded so far.
-* **View Results** opens a sortable, filterable table with a summary and per-video caption source. Rows without captions are highlighted red, auto-generated captions amber. Double-click a row to open the video.
+* **View Results** opens a sortable, filterable table with a summary and per-video caption source. Rows without captions are highlighted red, auto-generated captions amber. Click a row to open the video.
 * **Settings** edits the Canvas and Panopto credentials.
 * **Reset Data** clears cached JSON after a confirmation prompt.
 
@@ -94,10 +99,12 @@ python dataReset.py
 pip install pytest      # or: python -m unittest discover -s tests
 pytest tests -v
 ```
-234+ tests across 13 files cover the caption classifier, URL handling, the
+250+ tests across 16 files cover the caption classifier, URL handling, the
 Canvas/Panopto/YouTube API plumbing (network calls mocked), the GUI's logic
-(tkinter stubbed so it runs without a display), and the CI scripts themselves.
-The suite needs no network access, no browser, no display and no credentials.
+(`gui_api.py`, with no GUI toolkit involved at all - see
+[Why pywebview instead of Tkinter](#why-pywebview-instead-of-tkinter)), and
+the CI scripts themselves. The suite needs no network access, no browser, no
+display and no credentials.
 
 ## Continuous integration
 
@@ -210,10 +217,18 @@ To remove a platform, drop its branch from `sortUrls()` and its call from `runPi
 * **Headless mode finds nothing**: the Panopto and Canvas stages need a logged-in session. Headless mode suppresses the login prompt, so use it only where authentication is already handled.
 * **Panopto captions report `unknown`**: without OAuth credentials the audit can often only see that a caption control exists. Add the Panopto client ID and secret for authoritative answers.
 * **Rate limits**: lower `CANVAS_MAX_WORKERS` or raise `YOUTUBE_BACKOFF` if throttling responses appear.
-* **GUI window opens but is completely blank on macOS**: this is a long-standing Tcl/Tk bug, not specific to this app — any Tkinter program is affected on macOS 11 (Big Sur) and later when running on a Python build whose bundled Tcl/Tk is older than 8.6.13. `gui.py` works around it automatically by nudging the window's size right after it opens, which forces the affected Tk builds to redraw. If the window is still blank:
-  * Manually resize or move the window once — that alone fixes it for the rest of the session.
-  * Check your Tcl/Tk version: `python3 -c "import tkinter; print(tkinter.Tcl().eval('info patchlevel'))"`. Below `8.6.13`, upgrade Python (3.9.17+, 3.10.12+, 3.11.4+, or any 3.12+ from [python.org](https://www.python.org/downloads/macos/) bundle a fixed Tcl/Tk), or run `brew install python-tk` for a Homebrew Python.
-  * If you built the packaged `CC-Auditor` executable yourself with PyInstaller, it bundles whatever Tcl/Tk your build machine had at build time — rebuild it after upgrading Python/Tcl-Tk rather than just upgrading Python on the machine that runs it.
+* **`python gui.py` exits immediately with "pywebview is not installed"**: run `pip install -r requirements.txt`. On macOS, if it specifically mentions Cocoa/WebKit/PyObjC, run `pip install pyobjc` (this normally installs automatically as part of `pywebview`, but a stale or user-scoped Python environment can miss it).
+* **GUI window opens but the page is blank or never loads**: this means `webui/index.html` couldn't be found or loaded, not a rendering bug - `pywebview` uses the OS's own browser engine, which doesn't have the class of blank-window bugs Tkinter did. Check the terminal output for a `evaluate_js`/`JavascriptException` or a 404 for `style.css`/`app.js`; running `python gui.py` from the repository root (not the packaged executable) is the fastest way to rule out a packaging path issue.
+* **Linux: `python gui.py` fails with a GTK or WebKit import error**: install your distro's GTK 3 + WebKit2GTK development/runtime packages - see [pywebview's install docs](https://pywebview.flowrl.com/guide/installation.html) for the current package names, which vary by distro and release.
+* **The packaged `CC-Auditor` executable shows a blank window or can't find `webui/`**: rebuild it - the `.spec` file bundles `webui/` explicitly and `gui.py` resolves it via `sys._MEIPASS` when frozen, but only if the executable was built with the current `.spec`. An executable built before this change won't have `webui/` bundled at all.
+
+## Why pywebview instead of Tkinter
+
+Earlier versions of this GUI used Tkinter. On macOS, Tkinter's Tcl/Tk backend has a long-standing bug (unrelated to this app - any Tkinter program is affected) where windows render entirely blank on macOS Big Sur (11) and later when the bundled Tcl/Tk is older than 8.6.13, which is what most Python installs still ship. Font names and ttk themes also don't carry across platforms the way Tkinter's docs suggest, which caused a second, smaller set of rendering issues on macOS.
+
+Switching to [pywebview](https://pywebview.flowrl.com/) sidesteps both problems: the window is a small local web page (`webui/`) rendered by the operating system's own browser engine - WKWebView on macOS, WebView2 on Windows, WebKitGTK on Linux - the same rendering code each platform's real browser uses, not a separate UI toolkit bundled with Python. Layout and styling are ordinary HTML/CSS, so there's no cross-platform font/theme guessing game either.
+
+The GUI's actual behavior lives in `gui_api.py`, which has no dependency on `webview` at all - it's a plain Python class that reports progress through a `notify(event, payload)` callback. `gui.py` is a thin adapter that creates the pywebview window and turns those callbacks into JavaScript calls. This split is what makes `gui_api.py` fully unit tested (`tests/test_guiApi.py`) without a display, browser engine, or GUI toolkit of any kind.
 
 ## Additional resources
 

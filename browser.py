@@ -27,12 +27,6 @@ try:
 except Exception:  # pragma: no cover
     ChromeDriverManager = None  # type: ignore
 
-try:
-    import tkinter as tk
-except Exception:  # pragma: no cover - headless environments may lack Tk
-    tk = None  # type: ignore
-
-
 # Resolving a driver binary is slow, so cache the path for the whole process.
 _DRIVER_PATH: Optional[str] = None
 
@@ -180,33 +174,18 @@ class BrowserSession:
 
 
 def promptContinue(title: str, message: str) -> None:
-    """Block until the operator confirms, via Tk when available."""
+    """Block until the operator confirms.
+
+    The GUI registers a handler (see :func:`setPromptHandler`) that shows its
+    own login dialog; this terminal fallback only runs when a script is
+    invoked directly (``python runAudit.py``) without going through the GUI.
+    """
 
     if _PROMPT_HANDLER is not None:
         _PROMPT_HANDLER(title, message)
         return
 
-    if tk is None:
-        try:
-            input(f"{message}\nPress Enter once you are done...")
-        except EOFError:
-            pass
-        return
-
     try:
-        root = tk.Tk()
-    except Exception:  # pragma: no cover - no display available
-        try:
-            input(f"{message}\nPress Enter once you are done...")
-        except EOFError:
-            pass
-        return
-
-    root.title(title)
-    root.geometry("380x150")
-    root.attributes("-topmost", True)
-    tk.Label(root, text=message, wraplength=340, justify="center").pack(
-        padx=20, pady=20
-    )
-    tk.Button(root, text="Continue", width=14, command=root.destroy).pack(pady=5)
-    root.mainloop()
+        input(f"{title}: {message}\nPress Enter once you are done...")
+    except EOFError:
+        pass

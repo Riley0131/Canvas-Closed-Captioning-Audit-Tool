@@ -2,3 +2,9 @@ requests>=2.31
 selenium>=4.15
 webdriver-manager>=4.0
 youtube-transcript-api>=0.6
+pywebview>=5.0
+
+# pywebview's macOS backend talks to Cocoa/WebKit through PyObjC.
+# `pip install pywebview` pulls in the required pyobjc-* packages
+# automatically on macOS (they're platform-conditional dependencies of
+# pywebview itself) - nothing extra to install.

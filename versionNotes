@@ -1,5 +1,22 @@
 Beta Versions
 
+1.3.0
+-GUI rebuilt on pywebview instead of Tkinter. The window is now a small local
+ web page rendered by the OS's own browser engine (WKWebView on macOS,
+ WebView2 on Windows, WebKitGTK on Linux) instead of Tcl/Tk, which had a
+ long-standing bug rendering windows completely blank on macOS Big Sur and
+ later - reported as "I can't see any parts of the GUI" - along with smaller
+ font/theme portability issues. Fonts and layout are ordinary HTML/CSS now,
+ so there's no cross-platform guessing involved at all
+-The GUI's logic moved into a new toolkit-independent module, gui_api.py,
+ unit tested without any GUI toolkit, display, or browser; gui.py is now a
+ thin translation layer to pywebview
+-Tkinter dropped from the project entirely, including browser.py's
+ fallback login prompt (now a plain terminal prompt when the GUI isn't
+ running)
+-Packaging (CC-Auditor.spec) updated to bundle the new webui/ page and
+ resolve it correctly inside a frozen executable
+
 1.2.0
 -Test suite expanded from 62 to 230+ tests, now covering the Canvas/Panopto/
  YouTube API plumbing (network mocked), the shared browser session, and the

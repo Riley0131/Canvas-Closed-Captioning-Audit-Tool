@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Closed Captioning Audit</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="app-header">
+      <div>
+        <h1>Closed Captioning Audit</h1>
+        <p class="subtitle">Check Canvas courses for captioned video and identify the caption source.</p>
+      </div>
+      <span class="version" id="versionBadge">…</span>
+    </header>
+
+    <section class="card">
+      <h2>Audit</h2>
+      <div class="button-row">
+        <button id="runCompleteBtn" class="btn btn-accent">Run Complete Audit</button>
+        <button id="runCourseBtn" class="btn">Audit One Course…</button>
+        <button id="viewResultsBtn" class="btn">View Results</button>
+        <button id="stopBtn" class="btn btn-quiet" disabled>Stop</button>
+      </div>
+      <label class="checkbox-row">
+        <input type="checkbox" id="headlessCheckbox" />
+        Run the browser hidden (headless) — only works without an interactive login
+      </label>
+    </section>
+
+    <section class="card log-card">
+      <h2>Activity</h2>
+      <pre id="log" class="log"></pre>
+    </section>
+
+    <footer class="app-footer">
+      <div class="progress-track" id="progressTrack" hidden>
+        <div class="progress-bar"></div>
+      </div>
+      <span class="status" id="statusText">Ready</span>
+      <div class="footer-actions">
+        <button id="settingsBtn" class="btn">Settings</button>
+        <button id="resetBtn" class="btn btn-danger">Reset Data</button>
+      </div>
+    </footer>
+  </div>
+
+  <!-- Individual course audit dialog -->
+  <div class="overlay" id="courseDialog" hidden>
+    <div class="dialog">
+      <h3>Audit a single course</h3>
+      <label for="courseIdInput">Canvas course ID</label>
+      <input type="text" id="courseIdInput" placeholder="e.g. 12345" autocomplete="off" />
+      <p class="error" id="courseIdError" hidden></p>
+      <div class="dialog-actions">
+        <button id="courseCancelBtn" class="btn">Cancel</button>
+        <button id="courseConfirmBtn" class="btn btn-accent">Run audit</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings dialog -->
+  <div class="overlay" id="settingsDialog" hidden>
+    <div class="dialog">
+      <h3>Settings</h3>
+      <label for="canvasTokenInput">Canvas API token</label>
+      <input type="password" id="canvasTokenInput" autocomplete="off" />
+      <label for="clientIdInput">Panopto client ID</label>
+      <input type="password" id="clientIdInput" autocomplete="off" />
+      <label for="clientSecretInput">Panopto client secret</label>
+      <input type="password" id="clientSecretInput" autocomplete="off" />
+      <label class="checkbox-row">
+        <input type="checkbox" id="revealSettingsCheckbox" />
+        Show values
+      </label>
+      <p class="hint">
+        Credentials are stored in the config/ folder. Environment variables
+        CANVAS_API_TOKEN, PANOPTO_CLIENT_ID and PANOPTO_CLIENT_SECRET override
+        these values when set.
+      </p>
+      <p class="error" id="settingsError" hidden></p>
+      <div class="dialog-actions">
+        <button id="settingsCancelBtn" class="btn">Cancel</button>
+        <button id="settingsSaveBtn" class="btn btn-accent">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Login prompt dialog (shown when a browser-backed stage needs a login) -->
+  <div class="overlay" id="loginDialog" hidden>
+    <div class="dialog">
+      <h3 id="loginTitle">Login required</h3>
+      <p id="loginMessage"></p>
+      <div class="dialog-actions">
+        <button id="loginContinueBtn" class="btn btn-accent">Continue</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Generic confirm dialog (reset data, quit while running, ...) -->
+  <div class="overlay" id="confirmDialog" hidden>
+    <div class="dialog">
+      <h3 id="confirmTitle">Are you sure?</h3>
+      <p id="confirmMessage"></p>
+      <div class="dialog-actions">
+        <button id="confirmCancelBtn" class="btn">Cancel</button>
+        <button id="confirmOkBtn" class="btn btn-danger">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Results view -->
+  <div class="results-view" id="resultsView" hidden>
+    <header class="results-header">
+      <button id="resultsBackBtn" class="btn">&larr; Back</button>
+      <h2>Audit results</h2>
+      <button id="openResultsFileBtn" class="btn">Open results file</button>
+    </header>
+
+    <section class="card" id="resultsSummaryCard">
+      <p id="resultsSummaryLine" class="summary-line"></p>
+      <p id="resultsBreakdownLine" class="hint"></p>
+      <p id="resultsPlatformLine" class="hint"></p>
+    </section>
+
+    <section class="card results-table-card">
+      <div class="results-controls">
+        <label for="resultsFilter">Show:</label>
+        <select id="resultsFilter">
+          <option value="all">All</option>
+          <option value="missing">Missing captions</option>
+          <option value="auto_generated">Auto-generated</option>
+          <option value="human_edited">Edited / human-provided</option>
+          <option value="unknown">Captions (source unknown)</option>
+          <option value="none">No captions</option>
+        </select>
+        <span class="hint">Click a row to open the video</span>
+      </div>
+      <div class="table-scroll">
+        <table id="resultsTable">
+          <thead>
+            <tr>
+              <th data-sort="type">Platform</th>
+              <th data-sort="captions">Captions</th>
+              <th data-sort="kind">Caption source</th>
+              <th data-sort="confidence">Confidence</th>
+              <th data-sort="course">Course</th>
+              <th data-sort="url">URL</th>
+            </tr>
+          </thead>
+          <tbody id="resultsTableBody"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

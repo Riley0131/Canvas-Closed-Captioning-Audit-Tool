@@ -1,18 +1,15 @@
-"""Tests for gui.py's application logic.
+"""Tests for gui.py's thin pywebview wiring.
 
-gui.py needs a real display to run for real, which CI and many dev machines
-don't have. Rather than skip GUI coverage entirely, this stubs tkinter with
-lightweight fakes that record how they were used, so every callback, the
-background worker, cancellation, and the results table's filtering/sorting are
-exercised without ever opening a window. This trades fidelity to Tcl/Tk's own
-behavior for tests that run anywhere, fast and deterministically.
+gui_api.AuditApi (the actual logic) is tested on its own in test_guiApi.py
+without any GUI toolkit involved. These tests cover only the translation
+layer in gui.py: building the notify() callback, wiring the window's close
+confirmation, and main()'s setup - using a lightweight stand-in for the
+`webview` package so nothing here needs a real window or display.
 """
 
+import json
 import os
-import queue
 import sys
-import tempfile
-import threading
 import types
 import unittest
 from unittest import mock
@@ -21,588 +18,169 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 
-# ----------------------------------------------------------------------
-# Minimal tkinter stand-in, installed into sys.modules before gui.py is
-# imported so ``import tkinter as tk`` resolves to these fakes everywhere.
-class _Widget:
-    def __init__(self, master=None, **kw):
-        self.master = master
-        self.kw = dict(kw)
-        self._children = []
-        if isinstance(master, _Widget):
-            master._children.append(self)
+class _FakeEvent:
+    """Stand-in for webview.Event: supports += and records handlers."""
 
-    def pack(self, **kw):
+    def __init__(self):
+        self.handlers = []
+
+    def __iadd__(self, handler):
+        self.handlers.append(handler)
         return self
 
-    def grid(self, **kw):
-        return self
 
-    def configure(self, **kw):
-        self.kw.update(kw)
-        return self
-
-    config = configure
-
-    def columnconfigure(self, *a, **kw):
-        pass
-
-    def rowconfigure(self, *a, **kw):
-        pass
-
-    def bind(self, *a, **kw):
-        pass
-
-    def winfo_children(self):
-        return self._children
-
-    def focus_set(self):
-        pass
-
-    def destroy(self):
-        pass
-
-    def grab_set(self):
-        pass
-
-    def transient(self, *a):
-        pass
-
-    def resizable(self, *a):
-        pass
-
-    def title(self, *a):
-        pass
-
-    def geometry(self, *a):
-        pass
-
-    def minsize(self, *a):
-        pass
-
-    def attributes(self, *a):
-        pass
-
-    def insert(self, *a, **kw):
-        pass
-
-    def delete(self, *a, **kw):
-        pass
-
-    def see(self, *a):
-        pass
-
-    def start(self, *a):
-        pass
-
-    def stop(self, *a):
-        pass
-
-    def yview(self, *a):
-        pass
-
-    def xview(self, *a):
-        pass
-
-    def set(self, *a):
-        pass
-
-    def heading(self, *a, **kw):
-        pass
-
-    def column(self, *a, **kw):
-        pass
-
-    def tag_configure(self, *a, **kw):
-        pass
-
-    def get_children(self):
-        return []
-
-    def selection(self):
-        return []
-
-    def item(self, *a, **kw):
-        return ()
-
-    def after(self, ms, fn=None, *a):
-        # Only fire zero-delay callbacks synchronously; record delayed ones so
-        # a self-rescheduling poller does not recurse forever in tests.
-        if fn and ms == 0:
-            fn(*a)
-
-    def protocol(self, *a):
-        pass
-
-    def mainloop(self):
-        pass
+class _FakeWindow:
+    def __init__(self):
+        self.evaluate_js = mock.Mock()
+        self.create_confirmation_dialog = mock.Mock(return_value=True)
+        self.events = types.SimpleNamespace(closing=_FakeEvent())
 
 
-class _Var:
-    def __init__(self, master=None, value=None, **kw):
-        self._v = value
-
-    def get(self):
-        return self._v
-
-    def set(self, v):
-        self._v = v
+def _installWebviewStub():
+    fake_module = types.ModuleType("webview")
+    fake_module.create_window = mock.Mock(return_value=_FakeWindow())
+    fake_module.start = mock.Mock()
+    sys.modules["webview"] = fake_module
+    return fake_module
 
 
-class _Style:
-    def theme_names(self):
-        return ("clam", "default")
-
-    def theme_use(self, name):
-        pass
-
-    def configure(self, *a, **kw):
-        pass
-
-
-def _installTkinterStub():
-    tk = types.ModuleType("tkinter")
-    for name in ("Tk", "Toplevel", "Frame", "Label", "Button", "Entry", "Text", "Checkbutton"):
-        setattr(tk, name, type(name, (_Widget,), {}))
-    tk.StringVar = type("StringVar", (_Var,), {})
-    tk.BooleanVar = type("BooleanVar", (_Var,), {})
-    tk.Misc = _Widget
-    tk.TclError = type("TclError", (Exception,), {})
-
-    messagebox = types.ModuleType("tkinter.messagebox")
-    messagebox.showinfo = mock.Mock()
-    messagebox.showerror = mock.Mock()
-    messagebox.askyesno = mock.Mock(return_value=False)
-    tk.messagebox = messagebox
-
-    ttk = types.ModuleType("tkinter.ttk")
-    for name in (
-        "Frame", "Label", "Button", "Entry", "Checkbutton", "Combobox",
-        "Treeview", "Scrollbar", "Progressbar", "LabelFrame", "Notebook",
-    ):
-        setattr(ttk, name, type(name, (_Widget,), {}))
-    ttk.Style = _Style
-    tk.ttk = ttk
-
-    filedialog = types.ModuleType("tkinter.filedialog")
-
-    sys.modules["tkinter"] = tk
-    sys.modules["tkinter.ttk"] = ttk
-    sys.modules["tkinter.messagebox"] = messagebox
-    sys.modules["tkinter.filedialog"] = filedialog
-
-    return tk, ttk, messagebox
-
-
-tk, ttk, messagebox = _installTkinterStub()
+_installWebviewStub()
 sys.modules.pop("gui", None)
-import gui  # noqa: E402  (must follow the sys.modules stub installation)
-from auditCore import isCancelled, resetCancel  # noqa: E402
-
+import gui  # noqa: E402  (must follow the webview stub installation)
 
-def _newApp():
-    root = tk.Tk()
-    return gui.AuditApp(root), root
-
-
-class MainWindowTests(unittest.TestCase):
-    def test_windowBuildsWithoutError(self):
-        app, _root = _newApp()
-        self.assertIsNotNone(app.runButton)
-        self.assertIsNotNone(app.stopButton)
-
-    def test_logDrainMovesQueuedLinesIntoTheLogWidget(self):
-        app, _root = _newApp()
-        with mock.patch.object(app, "_appendLog") as append_log:
-            app.logQueue.put("line one")
-            app.logQueue.put("line two")
-            app._drainLog()
-
-        self.assertEqual(append_log.call_count, 2)
 
-    def test_runningStateTogglesButtonsAndProgress(self):
-        app, _root = _newApp()
-
-        app._setRunning(True, "busy")
-        self.assertEqual(app.runButton.kw.get("state"), "disabled")
-        self.assertEqual(app.stopButton.kw.get("state"), "normal")
-
-        app._setRunning(False, "Ready")
-        self.assertEqual(app.runButton.kw.get("state"), "normal")
-        self.assertEqual(app.stopButton.kw.get("state"), "disabled")
-
-
-class QueueWriterTests(unittest.TestCase):
-    def test_writeSplitsOnNewlinesAndBuffersThePartialTail(self):
-        sink: "queue.Queue[str]" = queue.Queue()
-        writer = gui._QueueWriter(sink)
-
-        writer.write("one\ntwo\npartial")
-        writer.flush()
-
-        self.assertEqual([sink.get(), sink.get(), sink.get()], ["one", "two", "partial"])
-        self.assertTrue(sink.empty())
-
-    def test_flushWithNothingBufferedIsANoOp(self):
-        sink: "queue.Queue[str]" = queue.Queue()
-        writer = gui._QueueWriter(sink)
-        writer.flush()
-        self.assertTrue(sink.empty())
-
-    def test_isattyIsFalse(self):
-        writer = gui._QueueWriter(queue.Queue())
-        self.assertFalse(writer.isatty())
-
-
-class ResultsWindowTests(unittest.TestCase):
-    def setUp(self):
-        _app, self.root = _newApp()
-        self.entries = [
-            {"type": "panopto", "url": "https://p/1", "has_captions": True,
-             "caption_kind": "auto_generated", "caption_confidence": "high", "course_id": "101"},
-            {"type": "panopto", "url": "https://p/2", "has_captions": True,
-             "caption_kind": "human_edited", "caption_confidence": "medium"},
-            {"type": "youtube", "url": "https://y/3", "has_captions": False},
-            {"type": "Canvas", "url": "https://c/4", "has_captions": True},  # legacy row, no caption_kind
-            "not a dict",
-        ]
+class BuildNotifierTests(unittest.TestCase):
+    def test_noWindowYetIsANoOp(self):
+        notify = gui.buildNotifier({})
+        notify("log", "a line")  # must not raise
 
-    def test_malformedEntriesAreIgnoredAtConstruction(self):
-        window = gui.ResultsWindow(self.root, self.entries)
-        self.assertEqual(len(window.entries), 4)
+    def test_callsEvaluateJsWithEncodedEventAndPayload(self):
+        window = mock.Mock()
+        notify = gui.buildNotifier({"window": window})
 
-    def test_allFilterShowsEveryValidRow(self):
-        window = gui.ResultsWindow(self.root, self.entries)
-        self.assertEqual(len(window._rows()), 4)
+        notify("run_started", {"label": "Complete audit"})
 
-    def test_missingCaptionsFilterShowsOnlyUncaptioned(self):
-        window = gui.ResultsWindow(self.root, self.entries)
-        window.filterVar.set("Missing captions")
-        rows = window._rows()
+        window.evaluate_js.assert_called_once()
+        script = window.evaluate_js.call_args.args[0]
+        self.assertTrue(script.startswith("window.dispatchAppEvent("))
 
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["url"], "https://y/3")
+        # The JSON payload embedded in the script round-trips correctly.
+        encoded = script[len("window.dispatchAppEvent(") : -1]
+        decoded = json.loads(encoded)
+        self.assertEqual(decoded, {"event": "run_started", "payload": {"label": "Complete audit"}})
 
-    def test_autoGeneratedFilterMatchesOnlyThatKind(self):
-        window = gui.ResultsWindow(self.root, self.entries)
-        window.filterVar.set("Auto-generated")
-        rows = window._rows()
+    def test_evaluateJsFailureIsSwallowed(self):
+        window = mock.Mock()
+        window.evaluate_js.side_effect = RuntimeError("window closed")
+        notify = gui.buildNotifier({"window": window})
 
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["url"], "https://p/1")
+        notify("log", "line")  # must not raise
 
-    def test_legacyRowWithNoCaptionKindIsTreatedAsUnknown(self):
-        window = gui.ResultsWindow(self.root, self.entries)
-        window.filterVar.set("Captions (source unknown)")
-        rows = window._rows()
+    def test_lookupIsLazyPerCall(self):
+        holder = {}
+        notify = gui.buildNotifier(holder)
 
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["url"], "https://c/4")
+        notify("log", "before window exists")  # no-op, no window yet
 
-    def test_sortTogglesDirectionOnRepeatedClicks(self):
-        window = gui.ResultsWindow(self.root, self.entries)
-        window._sortBy("url")
-        first_order = [row["url"] for row in window._rows()]
-        window._sortBy("url")
-        second_order = [row["url"] for row in window._rows()]
-
-        self.assertEqual(first_order, list(reversed(second_order)))
+        window = mock.Mock()
+        holder["window"] = window
+        notify("log", "after window exists")
 
-    def test_summaryCountsMatchEntries(self):
-        # _buildSummary runs in __init__; just confirm no exception and that
-        # summarizeResults produced sane numbers via the same entries.
-        from auditCore import summarizeResults
-
-        window = gui.ResultsWindow(self.root, self.entries)
-        summary = summarizeResults(window.entries)
-        self.assertEqual(summary["total"], 4)
-        self.assertEqual(summary["withCaptions"], 3)
-
-
-class SettingsDialogTests(unittest.TestCase):
-    def test_saveWritesAllThreeCredentials(self):
-        _app, root = _newApp()
-
-        with tempfile.TemporaryDirectory() as tmp:
-            canvas_path = os.path.join(tmp, "canvasAPI.py")
-            panopto_path = os.path.join(tmp, "panoptoKey.py")
+        window.evaluate_js.assert_called_once()
 
-            with mock.patch.object(gui, "CANVAS_CONFIG", canvas_path), \
-                 mock.patch.object(gui, "PANOPTO_CONFIG", panopto_path):
-                dialog = gui.SettingsDialog(root)
-                dialog.fields["CANVAS_API_TOKEN"].set("tok")
-                dialog.fields["Client_ID"].set("cid")
-                dialog.fields["Client_Secret"].set("sec")
-                dialog._save()
 
-            from configStore import readConfigValue
+class ConfirmQuitWhileBusyTests(unittest.TestCase):
+    def test_notBusyClosesImmediatelyWithoutPromptingUser(self):
+        window = mock.Mock()
+        api = mock.Mock(busy=False)
 
-            self.assertEqual(readConfigValue(canvas_path, "CANVAS_API_TOKEN"), "tok")
-            self.assertEqual(readConfigValue(panopto_path, "Client_ID"), "cid")
-            self.assertEqual(readConfigValue(panopto_path, "Client_Secret"), "sec")
+        result = gui.confirmQuitWhileBusy(window, api)
 
-    def test_writeFailureShowsErrorAndDoesNotCloseDialog(self):
-        _app, root = _newApp()
-        dialog = gui.SettingsDialog(root)
+        self.assertTrue(result)
+        window.create_confirmation_dialog.assert_not_called()
 
-        with mock.patch.object(gui, "writeConfigValue", return_value="disk full"), \
-             mock.patch.object(dialog, "destroy") as destroy, \
-             mock.patch.object(messagebox, "showerror") as show_error:
-            dialog._save()
+    def test_busyAsksForConfirmation(self):
+        window = mock.Mock()
+        window.create_confirmation_dialog.return_value = True
+        api = mock.Mock(busy=True)
 
-        show_error.assert_called_once()
-        destroy.assert_not_called()
+        result = gui.confirmQuitWhileBusy(window, api)
 
+        self.assertTrue(result)
+        window.create_confirmation_dialog.assert_called_once()
 
-class BackgroundWorkerTests(unittest.TestCase):
-    def test_workOutputIsCapturedAndFinishCallbackRuns(self):
-        app, _root = _newApp()
-        finished = threading.Event()
+    def test_busyAndDeclinedKeepsWindowOpen(self):
+        window = mock.Mock()
+        window.create_confirmation_dialog.return_value = False
+        api = mock.Mock(busy=True)
 
-        def work():
-            print("line from the stage")
+        self.assertFalse(gui.confirmQuitWhileBusy(window, api))
 
-        with mock.patch.object(app, "_onFinished", side_effect=lambda *a: finished.set()):
-            app._runInBackground("Test stage", work)
-            app.worker.join(5)
 
-        self.assertTrue(finished.wait(5))
+class MainTests(unittest.TestCase):
+    def test_mainCreatesWindowAndStartsTheEventLoop(self):
+        fake_window = _FakeWindow()
+        fake_webview = sys.modules["webview"]
+        fake_webview.create_window.return_value = fake_window
+        fake_webview.create_window.reset_mock()
+        fake_webview.start.reset_mock()
 
-    def test_exceptionInWorkIsReportedNotRaised(self):
-        app, _root = _newApp()
-        seen = {}
+        with mock.patch("gui.AuditApi") as fake_api_cls:
+            fake_api = mock.Mock(busy=False)
+            fake_api_cls.return_value = fake_api
 
-        def work():
-            raise RuntimeError("boom")
+            gui.main()
 
-        def capture(label, error):
-            seen["label"] = label
-            seen["error"] = error
+        fake_webview.create_window.assert_called_once()
+        kwargs = fake_webview.create_window.call_args.kwargs
+        self.assertEqual(kwargs["url"], gui.INDEX_HTML)
+        self.assertIs(kwargs["js_api"], fake_api)
 
-        with mock.patch.object(app, "_onFinished", side_effect=capture):
-            app._runInBackground("Failing stage", work)
-            app.worker.join(5)
+        fake_webview.start.assert_called_once()
+        self.assertEqual(len(fake_window.events.closing.handlers), 1)
 
-        self.assertEqual(seen["label"], "Failing stage")
-        self.assertIsInstance(seen["error"], RuntimeError)
+    def test_closingHandlerWiredByMainConsultsApiBusyState(self):
+        fake_window = _FakeWindow()
+        fake_webview = sys.modules["webview"]
+        fake_webview.create_window.return_value = fake_window
 
-    def test_secondRunWhileBusyIsRejected(self):
-        app, _root = _newApp()
-        release = threading.Event()
+        with mock.patch("gui.AuditApi") as fake_api_cls:
+            fake_api = mock.Mock(busy=True)
+            fake_api_cls.return_value = fake_api
 
-        def slow_work():
-            release.wait(5)
+            gui.main()
 
-        app._runInBackground("Slow stage", slow_work)
-        try:
-            with mock.patch.object(messagebox, "showinfo") as show_info:
-                app._runInBackground("Second stage", lambda: None)
-            show_info.assert_called_once()
-        finally:
-            release.set()
-            app.worker.join(5)
+        handler = fake_window.events.closing.handlers[0]
+        fake_window.create_confirmation_dialog.return_value = False
 
-    def test_onFinishedReportsCancelledRunAsStoppedEarly(self):
-        app, _root = _newApp()
-        resetCancel()
-        from auditCore import requestCancel
+        self.assertFalse(handler())
+        fake_window.create_confirmation_dialog.assert_called_once()
 
-        requestCancel()
-        try:
-            with mock.patch.object(messagebox, "askyesno", return_value=False) as ask:
-                app._onFinished("Some stage", None)
-        finally:
-            resetCancel()
 
-        self.assertIn("stopped early", ask.call_args.args[1])
+class IndexHtmlPathTests(unittest.TestCase):
+    def test_indexHtmlPointsAtAnExistingFile(self):
+        self.assertTrue(os.path.exists(gui.INDEX_HTML))
+        self.assertTrue(gui.INDEX_HTML.endswith("index.html"))
 
-    def test_onFinishedReportsNormalCompletion(self):
-        app, _root = _newApp()
-        resetCancel()
 
-        with mock.patch.object(messagebox, "askyesno", return_value=False) as ask:
-            app._onFinished("Some stage", None)
+class ResolveBaseDirTests(unittest.TestCase):
+    """A frozen PyInstaller build extracts data files under sys._MEIPASS, not
+    next to the script - resolveBaseDir() must prefer that when present."""
 
-        self.assertIn("complete", ask.call_args.args[1])
-        self.assertNotIn("stopped early", ask.call_args.args[1])
+    def test_nonFrozenUsesScriptDirectory(self):
+        with mock.patch.object(gui.sys, "frozen", False, create=True):
+            self.assertEqual(gui.resolveBaseDir(), ROOT)
 
+    def test_frozenUsesMeipass(self):
+        with mock.patch.object(gui.sys, "frozen", True, create=True), \
+             mock.patch.object(gui.sys, "_MEIPASS", "/tmp/frozen-bundle", create=True):
+            self.assertEqual(gui.resolveBaseDir(), "/tmp/frozen-bundle")
 
-class CancellationTests(unittest.TestCase):
-    def tearDown(self):
-        resetCancel()
-
-    def test_stopAuditSetsCancellationFlag(self):
-        app, _root = _newApp()
-        resetCancel()
-
-        app.stopAudit()
-
-        self.assertTrue(isCancelled())
-
-    def test_promptFromWorkerDoesNotDeadlockWhenCalledFromAWorkerThread(self):
-        app, _root = _newApp()
-        finished = threading.Event()
-
-        def worker():
-            app._promptFromWorker("Login", "please log in")
-            finished.set()
-
-        thread = threading.Thread(target=worker)
-        thread.start()
-        thread.join(5)
-
-        self.assertTrue(finished.is_set())
-
-    def test_promptFromWorkerOnMainThreadShowsDirectly(self):
-        app, _root = _newApp()
-        with mock.patch.object(messagebox, "showinfo") as show_info:
-            app._promptFromWorker("Login", "please log in")
-
-        show_info.assert_called_once()
-
-
-class ResetDataTests(unittest.TestCase):
-    def test_confirmedResetInvokesDataReset(self):
-        app, _root = _newApp()
-
-        with mock.patch.object(messagebox, "askyesno", return_value=True), \
-             mock.patch("dataReset.resetDataFiles", return_value=3) as reset_files, \
-             mock.patch.object(messagebox, "showinfo") as show_info:
-            app.resetData()
-
-        reset_files.assert_called_once()
-        show_info.assert_called_once()
-
-    def test_declinedResetDoesNothing(self):
-        app, _root = _newApp()
-
-        with mock.patch.object(messagebox, "askyesno", return_value=False), \
-             mock.patch("dataReset.resetDataFiles") as reset_files:
-            app.resetData()
-
-        reset_files.assert_not_called()
-
-
-class CloseHandlingTests(unittest.TestCase):
-    def test_closeWithNoWorkerDestroysImmediately(self):
-        app, _root = _newApp()
-        with mock.patch.object(app.root, "destroy") as destroy:
-            app._onClose()
-        destroy.assert_called_once()
-
-    def test_closeWhileRunningAsksForConfirmation(self):
-        app, _root = _newApp()
-        release = threading.Event()
-        app._runInBackground("Slow stage", lambda: release.wait(5))
-
-        try:
-            with mock.patch.object(messagebox, "askyesno", return_value=False) as ask, \
-                 mock.patch.object(app.root, "destroy") as destroy:
-                app._onClose()
-
-            ask.assert_called_once()
-            destroy.assert_not_called()
-        finally:
-            release.set()
-            app.worker.join(5)
-
-
-class MacBlankWindowNudgeTests(unittest.TestCase):
-    """gui.performMacBlankWindowNudge works around a macOS Tcl/Tk rendering
-    bug where windows render entirely blank until resized or moved."""
-
-    def test_mappedWindowIsGrownThenScheduledToShrinkBack(self):
-        fake_root = mock.Mock()
-        fake_root.winfo_width.return_value = 800
-        fake_root.winfo_height.return_value = 500
-
-        gui.performMacBlankWindowNudge(fake_root)
-
-        fake_root.geometry.assert_called_once_with("800x501")
-        fake_root.after.assert_called_once()
-        self.assertEqual(fake_root.after.call_args.args[0], 60)
-
-    def test_scheduledShrinkRestoresOriginalSize(self):
-        fake_root = mock.Mock()
-        fake_root.winfo_width.return_value = 800
-        fake_root.winfo_height.return_value = 500
-
-        gui.performMacBlankWindowNudge(fake_root)
-        shrink_callback = fake_root.after.call_args.args[1]
-
-        fake_root.geometry.reset_mock()
-        shrink_callback()
-
-        fake_root.geometry.assert_called_once_with("800x500")
-
-    def test_unmappedWindowIsSkippedWithoutTouchingGeometry(self):
-        fake_root = mock.Mock()
-        fake_root.winfo_width.return_value = 1
-        fake_root.winfo_height.return_value = 1
-
-        gui.performMacBlankWindowNudge(fake_root)
-
-        fake_root.geometry.assert_not_called()
-        fake_root.after.assert_not_called()
-
-    def test_tclErrorWhileMeasuringIsSwallowed(self):
-        fake_root = mock.Mock()
-        fake_root.update_idletasks.side_effect = tk.TclError("no display")
-
-        gui.performMacBlankWindowNudge(fake_root)  # must not raise
-
-        fake_root.geometry.assert_not_called()
-
-    def test_tclErrorWhileGrowingIsSwallowedAndShrinkIsNeverScheduled(self):
-        fake_root = mock.Mock()
-        fake_root.winfo_width.return_value = 800
-        fake_root.winfo_height.return_value = 500
-        fake_root.geometry.side_effect = tk.TclError("window already destroyed")
-
-        gui.performMacBlankWindowNudge(fake_root)  # must not raise
-
-        fake_root.after.assert_not_called()
-
-    def test_tclErrorWhileShrinkingIsSwallowed(self):
-        fake_root = mock.Mock()
-        fake_root.winfo_width.return_value = 800
-        fake_root.winfo_height.return_value = 500
-
-        gui.performMacBlankWindowNudge(fake_root)
-        shrink_callback = fake_root.after.call_args.args[1]
-
-        fake_root.geometry.side_effect = tk.TclError("window already destroyed")
-        shrink_callback()  # must not raise
-
-
-class MainEntryPointTests(unittest.TestCase):
-    @staticmethod
-    def _delaysScheduled(after_mock):
-        return [call.args[0] for call in after_mock.call_args_list]
-
-    def test_macNudgeIsScheduledOnDarwin(self):
-        with mock.patch.object(gui, "ensureDataDirs"), \
-             mock.patch.object(gui.sys, "platform", "darwin"):
-            app_root = tk.Tk()
-            with mock.patch.object(gui.tk, "Tk", return_value=app_root), \
-                 mock.patch.object(app_root, "after") as after, \
-                 mock.patch.object(app_root, "mainloop"):
-                gui.main()
-
-        # AuditApp's own log-drain poll (100ms) also uses .after; only assert
-        # that the 150ms mac-nudge scheduling was added alongside it.
-        self.assertIn(150, self._delaysScheduled(after))
-
-    def test_macNudgeIsNotScheduledOnOtherPlatforms(self):
-        with mock.patch.object(gui, "ensureDataDirs"), \
-             mock.patch.object(gui.sys, "platform", "win32"):
-            app_root = tk.Tk()
-            with mock.patch.object(gui.tk, "Tk", return_value=app_root), \
-                 mock.patch.object(app_root, "after") as after, \
-                 mock.patch.object(app_root, "mainloop"):
-                gui.main()
-
-        self.assertNotIn(150, self._delaysScheduled(after))
+    def test_frozenWithoutMeipassFallsBackToScriptDirectory(self):
+        with mock.patch.object(gui.sys, "frozen", True, create=True):
+            if hasattr(gui.sys, "_MEIPASS"):
+                del gui.sys._MEIPASS
+            self.assertEqual(gui.resolveBaseDir(), ROOT)
 
 
 if __name__ == "__main__":
